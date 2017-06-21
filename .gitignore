@@ -1,3 +1,9 @@
+## Ignore other robo repos
+robo*.git
+
+## Ignore project files
+.idea/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
