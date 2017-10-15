@@ -7,5 +7,5 @@ setup(name='robo_launcher',
       author_email='munk1@live.dk',
       packages=find_packages(),
       install_requires=['selenium', 'docker', 'GitPython'],
-      scripts=['bin/RunRoboLauncher']
+      scripts=['bin/RoboLauncher.py']
       )

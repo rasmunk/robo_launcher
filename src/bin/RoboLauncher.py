@@ -1,19 +1,23 @@
 import docker.errors, docker.types, requests.exceptions, time, os
+from definitions import ROOT_DIR
 from configparser import ConfigParser
 from util import RoboContainerInterface
 from util import ContainerConfig
 
 config = ConfigParser()
-config.read('../res/config.ini')
+config.read('../../res/config.ini')
 config.sections()
 exp_prop = 'ExperimentProperties'
 ea_prop = 'EAProperties'
 nn_prop = 'NNProperties'
 docker_prop = 'DockerProperties'
-client = docker.from_env()
+docker_port_prop = 'DockerPortProperties'
 
 
 class RoboLauncher:
+
+    client = docker.from_env()
+
     @staticmethod
     def error_message(args):
         print("Invalid parameter: " + args[0] + " allowed values: " + args[1])
@@ -85,6 +89,7 @@ class RoboLauncher:
     @staticmethod
     def start():
         RoboLauncher.valid_parameters()
+        os.chdir(ROOT_DIR)
         list_active_containers = []
         # Setup Docker network
         print("Setting up docker network")
@@ -92,38 +97,52 @@ class RoboLauncher:
         ipam_config = docker.types.IPAMConfig(pool_configs=[ipam_poll])
         try:
             # if already exists, disconnect and recreate the network from fresh
-            sim_network = client.networks.get(config.get(docker_prop, 'network_name'))
+            sim_network = RoboLauncher.client.networks.get(config.get(docker_prop, 'network_name'))
             for container in sim_network.containers:
                 sim_network.disconnect(container)
             sim_network.remove()
         except Exception as e:
             pass
-        client.networks.create(config.get(docker_prop, 'network_name'), driver="bridge", ipam=ipam_config)
-        # Jump out of src directory
-        os.chdir("..")
+        RoboLauncher.client.networks.create(config.get(docker_prop, 'network_name'), driver="bridge", ipam=ipam_config)
+        # Launch engine
         print("Launching Engine")
-        # # Launch engine
+        # Prepare engine config
+        config[ea_prop].update(config[docker_prop])
         engine = RoboContainerInterface(repo=config.get(docker_prop, 'engine_repo'), branch=config.get(docker_prop, 'engine_branch'),
                                         name=config.get(docker_prop, 'engine_name'),
                                         network=config.get(docker_prop, 'network_name'))
-        # engine.set_container_config(container_config=ContainerConfig())
+
+        engine.set_container_config(container_config=ContainerConfig(config=config[ea_prop]))
         list_active_containers.append(engine.start())
+        network_containers = engine.network_containers()
+        config.set(docker_prop, 'engine_ip', network_containers[config.get(docker_prop, 'network_name')]['IPAddress'])
+
+        print("Launching Simulator")
+        # Prepare simulator config
+        # Make docker properties available to the simulator
+        config[exp_prop].update(config[docker_prop])
+        # Launch simulator
+        sim = RoboContainerInterface(repo=config.get(docker_prop, 'simulator_repo'), branch=config.get(docker_prop, 'robot_branch'),
+                                     name=config.get(docker_prop, 'simulator_name'),
+                                     network=config.get(docker_prop, 'network_name'))
+        sim.set_container_config(container_config=ContainerConfig(config=config[exp_prop]))
+        list_active_containers.append(sim.start())
+        network_containers = sim.network_containers()
+        config.set(docker_prop, 'simulator_ip', network_containers[config.get(docker_prop, 'network_name')]['IPAddress'])
 
         print("Launching Robots")
         list_robots = []
-        # # Launch robots
+        # Prepare robot configuration
+        # Make docker properties available to the robots
+        config[nn_prop].update(config[docker_prop])
+        # Launch robots
         for idx in range(config.getint(exp_prop, 'num_robots')):
             list_robots.append(
                 RoboContainerInterface(repo=config.get(docker_prop, 'robot_repo'), branch=config.get(docker_prop, 'robot_branch'),
                                        name=config.get(docker_prop, 'robot_name'), network=config.get(docker_prop, 'network_name')))
+            list_robots[idx].set_container_config(container_config=ContainerConfig(config=config[nn_prop]))
             list_active_containers.append(list_robots[idx].start())
 
-        print("Launching Simulator")
-        # # Launch simulator
-        sim = RoboContainerInterface(repo=config.get(docker_prop, 'simulator_repo'), branch=config.get(docker_prop, 'robot_branch'),
-                                     name=config.get(docker_prop, 'simulator_name'),
-                                     network=config.get(docker_prop, 'network_name'))
-        list_active_containers.append(sim.start())
         # Save launched container id's
         try:
             f = open("experiment_" + str(int(time.time())) + ".txt", "w")
@@ -138,8 +157,8 @@ class RoboLauncher:
     @staticmethod
     def stop():
         print("Stopping infrastructure")
+        os.chdir(ROOT_DIR)
         my_containers = {}
-        os.chdir("..")
         for file in os.listdir("."):
             if file.startswith("experiment_"):
                 my_containers[file] = []
@@ -154,7 +173,7 @@ class RoboLauncher:
         for file, containers in my_containers.items():
             for container_id in containers:
                 try:
-                    client.containers.get(container_id).remove(v=True, link=False, force=True)
+                    RoboLauncher.client.containers.get(container_id).remove(v=True, link=False, force=True)
                 except docker.errors.NotFound:
                     print("Container id: " + container_id + " doesn't appear to be running")
 
@@ -166,28 +185,37 @@ class RoboLauncher:
             except NotImplementedError as e:
                 print("Failed to remove file: " + key)
 
+        print("Finished stopping the Infrastructure")
+
+    @staticmethod
+    def stop_all():
+        print("Removing every active container")
+        active_containers = RoboLauncher.client.containers.list(all=True)
+        [container.remove(force=True) for container in active_containers ]
+
     @staticmethod
     def clean():
         print("Cleaning infrastructure")
-        list_images = client.images.list()
+        list_images = RoboLauncher.client.images.list()
         for image in list_images:
             for tag in image.tags:
                 if config.get(docker_prop, 'engine_name') in tag or config.get(docker_prop, 'robot_name') in tag or \
                                 config.get(docker_prop, 'simulator_name') in tag:
-                    client.images.remove(image)
+                    RoboLauncher.client.images.remove(tag)
 
 
-# if __name__ == "__main__":
-#     commands = {
-#         'start': RoboLauncher.start,
-#         'stop': RoboLauncher.stop,
-#         'clean': RoboLauncher.clean
-#     }
-#     # Initialize Docker
-#     try:
-#         client.ping()
-#     except requests.exceptions.ConnectionError as e:
-#         print("Failed to connect to Docker, are you sure docker is running")
-#         exit(-1)
-#
-#     commands.get(config['Infrastructure']['command'])()
+if __name__ == "__main__":
+    commands = {
+        'start': RoboLauncher.start,
+        'stop': RoboLauncher.stop,
+        'stop_all': RoboLauncher.stop_all,
+        'clean': RoboLauncher.clean
+    }
+    # Initialize Docker
+    try:
+        RoboLauncher.client.ping()
+    except requests.exceptions.ConnectionError as e:
+        print("Failed to connect to Docker, are you sure docker is running")
+        exit(-1)
+
+    commands.get(config['Infrastructure']['command'])()

@@ -1,1 +1,2 @@
 from .RoboContainerInterface import RoboContainerInterface
+from .ContainerConfig import ContainerConfig
